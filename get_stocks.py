@@ -152,9 +152,21 @@ def main():
     # all_ticker_names = all_ticker_names[:30]
 
     # 2. 수집 기간 설정
-    # 요청대로 2024년부터
-    start_date = "20240101"
-    end_date = date
+    # 사용자가 시작 날짜를 입력하도록 변경 (기본값: 20240101)
+    default_start_date = "20240101"
+    user_input = input(
+        f"수집 시작 날짜를 입력하세요 (YYYYMMDD, 기본값: {default_start_date}): "
+    ).strip()
+    start_date = user_input if user_input else default_start_date
+
+    # 사용자가 종료 날짜를 입력하도록 변경 (기본값: 오늘)
+    default_end_date = date
+    user_input_end = input(
+        f"수집 종료 날짜를 입력하세요 (YYYYMMDD, 기본값: {default_end_date}): "
+    ).strip()
+    end_date = user_input_end if user_input_end else default_end_date
+
+    print(f"Data collection period: {start_date} ~ {end_date}")
 
     # 3. 실행
     start_time = time.time()
