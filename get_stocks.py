@@ -8,11 +8,18 @@ from datetime import datetime
 from tqdm import tqdm
 
 # 데이터베이스 연결 정보
-DB_HOST = "localhost"
-DB_PORT = "5432"
-DB_NAME = "postgres"
-DB_USER = "rexfelix"
-DB_PASSWORD = ""
+import os
+from dotenv import load_dotenv
+
+# 환경변수 로드
+load_dotenv()
+
+# 데이터베이스 연결 정보
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "postgres")
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
 
 def get_db_engine():

@@ -5,11 +5,18 @@ from sqlalchemy import create_engine
 from datetime import datetime, timedelta
 
 # 데이터베이스 연결 정보
-DB_HOST = "localhost"
-DB_PORT = "5432"
-DB_NAME = "postgres"
-DB_USER = "rexfelix"
-DB_PASSWORD = ""
+import os
+from dotenv import load_dotenv
+
+# 환경변수 로드
+load_dotenv()
+
+# 데이터베이스 연결 정보
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "postgres")
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
 
 def get_db_engine():
@@ -74,6 +81,28 @@ def calculate_heikin_ashi(df):
     return ha_df
 
 
+def calculate_smoothed_heikin_ashi(df, smooth_period=4):
+    """스무스드 하이킨아시 계산 (Pandas ewm 사용)"""
+    # 1. 일반 하이킨아시 계산
+    df_ha = calculate_heikin_ashi(df)
+
+    # 2. EMA 적용 (Smoothing)
+    df_sha = pd.DataFrame()
+    # 인덱스 유지를 위해
+    df_sha.index = df_ha.index
+
+    for col in ["open", "high", "low", "close"]:
+        # span=smooth_period corresponds to standard EMA window
+        df_sha[col] = df_ha[col].ewm(span=smooth_period, adjust=False).mean()
+
+    return df_sha
+
+
+def update_param(list_key, index, item_key, widget_key):
+    """Callback to update session state list items"""
+    st.session_state[list_key][index][item_key] = st.session_state[widget_key]
+
+
 def main():
     st.set_page_config(page_title="Stock Chart Dashboard", layout="wide")
     st.title("📈 Stock Chart Dashboard")
@@ -96,6 +125,10 @@ def main():
             "show_upper": True,
             "show_lower": True,
         }
+
+    # 스무스드 하이킨아시 상태 초기화
+    if "sha_list" not in st.session_state:
+        st.session_state["sha_list"] = []
 
     # 사이드바 설정
     st.sidebar.header("Configuration")
@@ -135,14 +168,32 @@ def main():
     for i, ma in enumerate(st.session_state["ma_lines"]):
         st.sidebar.markdown(f"**MA {i+1}**")
         sc1, sc2, sc3 = st.sidebar.columns([1, 1, 1])
-        ma["period"] = sc1.number_input(
-            f"기간", value=ma["period"], min_value=1, key=f"ma_p_{i}"
+        sc1.number_input(
+            f"기간",
+            value=ma["period"],
+            min_value=1,
+            key=f"ma_p_{i}",
+            on_change=update_param,
+            args=("ma_lines", i, "period", f"ma_p_{i}"),
         )
-        ma["color"] = sc2.color_picker(f"색상", value=ma["color"], key=f"ma_c_{i}")
-        ma["width"] = sc3.number_input(
-            f"굵기", value=ma["width"], min_value=1, max_value=10, key=f"ma_w_{i}"
+        sc2.color_picker(
+            f"색상",
+            value=ma["color"],
+            key=f"ma_c_{i}",
+            on_change=update_param,
+            args=("ma_lines", i, "color", f"ma_c_{i}"),
+        )
+        sc3.number_input(
+            f"굵기",
+            value=ma["width"],
+            min_value=1,
+            max_value=10,
+            key=f"ma_w_{i}",
+            on_change=update_param,
+            args=("ma_lines", i, "width", f"ma_w_{i}"),
         )
 
+        # Update max_ma_period using the current value in session state (which is up to date thanks to callback)
         if ma["period"] > max_ma_period:
             max_ma_period = ma["period"]
 
@@ -151,6 +202,10 @@ def main():
     st.sidebar.subheader("볼린저밴드 (BB)")
 
     bb = st.session_state["bb_settings"]
+    # BB settings are static dict, so regular update is fine or use callback.
+    # User complained about "Period" +/- buttons specifically, which implies dynamic number inputs.
+    # BB period is static single input, usually less laggy, but worth checking?
+    # Keeping BB as is for now unless requested, as it's not in a dynamic loop.
     bb["enabled"] = st.sidebar.checkbox("볼린저밴드 켜기", value=bb["enabled"])
 
     if bb["enabled"]:
@@ -175,6 +230,32 @@ def main():
         # 데이터 버퍼 계산을 위해 max period 업데이트
         if bb["period"] > max_ma_period:
             max_ma_period = bb["period"]
+
+    # 6. 스무스드 하이킨아시 (SHA) 설정
+    st.sidebar.divider()
+    st.sidebar.subheader("스무스드 하이킨아시 (SHA)")
+
+    col_sha_add, col_sha_del = st.sidebar.columns([1, 1])
+    with col_sha_add:
+        if st.button("SHA 추가 ➕", use_container_width=True):
+            st.session_state["sha_list"].append({"period": 10})
+    with col_sha_del:
+        if st.button("SHA 삭제 ➖", use_container_width=True):
+            if st.session_state["sha_list"]:
+                st.session_state["sha_list"].pop()
+
+    for i, sha in enumerate(st.session_state["sha_list"]):
+        st.sidebar.markdown(f"**SHA {i+1}**")
+        st.sidebar.number_input(
+            f"기간",
+            value=sha["period"],
+            min_value=1,
+            key=f"sha_p_{i}",
+            on_change=update_param,
+            args=("sha_list", i, "period", f"sha_p_{i}"),
+        )
+        if sha["period"] > max_ma_period:
+            max_ma_period = sha["period"]
 
     st.sidebar.divider()
 
@@ -235,6 +316,11 @@ def main():
                 view_df["date_str"] = view_df["date"].dt.strftime("%Y-%m-%d")
 
                 # 1. 캔들/하이킨아시 차트 추가
+                # -----------------------------------------------------------
+                # Plotly 렌더링 (TradingView 스타일 최적화)
+                # -----------------------------------------------------------
+
+                # 1. 캔들/하이킨아시 차트 추가
                 traces = [
                     go.Candlestick(
                         x=view_df["date_str"],
@@ -268,7 +354,6 @@ def main():
 
                 # 3. 볼린저밴드 Trace 생성
                 if bb["enabled"]:
-                    # 상한선 (점선)
                     if bb["show_upper"] and bb_col_upper in view_df.columns:
                         traces.append(
                             go.Scatter(
@@ -281,8 +366,6 @@ def main():
                                 name="BB Upper",
                             )
                         )
-
-                    # 기준선 (실선) - 보통 기준선은 실선으로 많이 씀, 요청에 '산하한선은 점선'이라 함
                     if bb["show_mid"] and bb_col_mid in view_df.columns:
                         traces.append(
                             go.Scatter(
@@ -293,8 +376,6 @@ def main():
                                 name="BB Mid",
                             )
                         )
-
-                    # 하한선 (점선)
                     if bb["show_lower"] and bb_col_lower in view_df.columns:
                         traces.append(
                             go.Scatter(
@@ -308,25 +389,62 @@ def main():
                             )
                         )
 
+                # 4. 스무스드 하이킨아시 (SHA) Trace 생성 (Overlay)
+                for sha_conf in st.session_state["sha_list"]:
+                    period = sha_conf["period"]
+                    sha_res = calculate_smoothed_heikin_ashi(df, smooth_period=period)
+
+                    sha_res["date"] = pd.to_datetime(df["date"])
+                    mask_sha = (sha_res["date"] >= pd.Timestamp(start_date)) & (
+                        sha_res["date"] <= pd.Timestamp(end_date)
+                    )
+                    view_sha = sha_res.loc[mask_sha].copy()
+                    view_sha["date_str"] = view_sha["date"].dt.strftime("%Y-%m-%d")
+
+                    if not view_sha.empty:
+                        traces.append(
+                            go.Candlestick(
+                                x=view_sha["date_str"],
+                                open=view_sha["open"],
+                                high=view_sha["high"],
+                                low=view_sha["low"],
+                                close=view_sha["close"],
+                                name=f"SHA ({period})",
+                                increasing_line_color="#FF00FF",  # Magenta
+                                decreasing_line_color="#FFFFFF",  # White
+                                opacity=0.7,
+                            )
+                        )
+
                 fig = go.Figure(data=traces)
 
+                # TradingView 스타일 UX 설정
                 fig.update_layout(
                     title=f"{title_prefix} Chart - {stock_name}",
                     xaxis_title="Date",
                     yaxis_title="Price",
-                    xaxis_rangeslider_visible=False,
+                    xaxis_rangeslider_visible=False,  # 하단 슬라이더 제거 (공간 확보)
                     xaxis_type="category",
                     height=600,
+                    dragmode="pan",  # 기본 드래그 모드를 이동(Pan)으로 설정
                     legend=dict(
                         orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
                     ),
+                    hovermode="x unified",  # 십자선 마우스 오버 효과 강화
                 )
 
                 # X축 틱 레이블 과밀 방지
                 if len(view_df) > 30:
                     fig.update_xaxes(dtick=max(1, len(view_df) // 10))
 
-                st.plotly_chart(fig, use_container_width=True)
+                # 스크롤 줌 활성화
+                config = {
+                    "scrollZoom": True,
+                    "displayModeBar": True,
+                    "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+                }
+
+                st.plotly_chart(fig, use_container_width=True, config=config)
 
                 with st.expander("Raw Data 보기"):
                     st.dataframe(df)
