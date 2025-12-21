@@ -152,8 +152,8 @@ def main():
     # all_ticker_names = all_ticker_names[:30]
 
     # 2. 수집 기간 설정
-    # 사용자가 시작 날짜를 입력하도록 변경 (기본값: 20240101)
-    default_start_date = "20240101"
+    # 사용자가 시작 날짜를 입력하도록 변경 (기본값: 20190101)
+    default_start_date = "20190101"
     user_input = input(
         f"수집 시작 날짜를 입력하세요 (YYYYMMDD, 기본값: {default_start_date}): "
     ).strip()
