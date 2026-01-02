@@ -6,13 +6,13 @@ from sqlalchemy import create_engine
 import multiprocessing
 from datetime import datetime, timedelta
 from tqdm import tqdm
-
-# 데이터베이스 연결 정보
 import os
 from dotenv import load_dotenv
 
 # 환경변수 로드
-load_dotenv()
+script_dir = os.path.dirname(os.path.abspath(__file__))
+env_path = os.path.join(script_dir, ".env")
+load_dotenv(env_path)
 
 # 데이터베이스 연결 정보
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -141,6 +141,17 @@ def save_batch_to_db(data_list, engine):
         print(f"\nError saving batch: {e}")
 
 
+def get_tickers_from_db(engine):
+    """DB에서 유니크한 티커와 종목명 가져오기 (Fallback)"""
+    try:
+        query = "SELECT DISTINCT ticker, name FROM stocks"
+        df = pd.read_sql(query, engine)
+        return list(zip(df["ticker"], df["name"]))
+    except Exception as e:
+        print(f"Error fetching tickers from DB: {e}")
+        return []
+
+
 def main():
     engine = get_db_engine()
 
@@ -168,15 +179,31 @@ def main():
 
     print(f"New data range: {start_date_str} ~ {end_date_str}")
 
-    # 3. 대상 종목 가져오기
+    # 3. 대상 종목 가져오기 (Hybrid Mechanism)
     print("Fetching ticker list and names...")
+
+    # KOSPI
     kospi_tickers = stock.get_market_ticker_list(end_date_str, market="KOSPI")
     kospi_list = [(t, stock.get_market_ticker_name(t)) for t in kospi_tickers]
 
+    # KOSDAQ
     kosdaq_tickers = stock.get_market_ticker_list(end_date_str, market="KOSDAQ")
     kosdaq_list = [(t, stock.get_market_ticker_name(t)) for t in kosdaq_tickers]
 
     all_ticker_names = kospi_list + kosdaq_list
+    print(f"Tickers found via Pykrx: {len(all_ticker_names)}")
+
+    # Fallback: Pykrx가 0개를 반환하면 DB에서 가져옴
+    if len(all_ticker_names) == 0:
+        print(
+            "\n[WARNING] Pykrx returned 0 tickers. Switching to Fallback Mode (DB)..."
+        )
+        all_ticker_names = get_tickers_from_db(engine)
+        print(f"Tickers found via DB Fallback: {len(all_ticker_names)}")
+
+    if len(all_ticker_names) == 0:
+        print("\n[ERROR] No tickers found even from DB. Aborting.")
+        return
 
     # 4. 실행
     start_time = time.time()
