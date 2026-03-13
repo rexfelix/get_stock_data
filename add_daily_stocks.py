@@ -166,9 +166,10 @@ def get_tickers_from_db(engine):
 # 시장 지수 (KOSPI / KOSDAQ) 수집
 # ============================================================
 
+# Yahoo Finance 심볼 사용 (KRX API rate limit 우회)
 INDEX_SYMBOLS = {
-    "KS11": "KOSPI",
-    "KQ11": "KOSDAQ",
+    "^KS11": "KOSPI",
+    "^KQ11": "KOSDAQ",
 }
 
 
@@ -185,35 +186,46 @@ def get_last_index_update_date(engine):
         return None
 
 
-def fetch_index_data(symbol, name, start_date, end_date):
-    """단일 시장 지수의 OHLCV 데이터 수집"""
-    try:
-        df = fdr.DataReader(symbol, start_date, end_date)
-        if df.empty:
-            return None
+def fetch_index_data(symbol, name, start_date, end_date, max_retries=3):
+    """단일 시장 지수의 OHLCV 데이터 수집 (재시도 포함)"""
+    for attempt in range(1, max_retries + 1):
+        try:
+            df = fdr.DataReader(symbol, start_date, end_date)
+            if df.empty:
+                return None
 
-        df.index.name = "date"
-        df = df.reset_index()
+            df.index.name = "date"
+            df = df.reset_index()
 
-        rename_map = {
-            "Open": "open",
-            "High": "high",
-            "Low": "low",
-            "Close": "close",
-            "Volume": "volume",
-        }
-        df = df.rename(columns=rename_map)
+            rename_map = {
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Volume": "volume",
+            }
+            df = df.rename(columns=rename_map)
 
-        required_cols = ["date", "open", "high", "low", "close", "volume"]
-        df = df[[c for c in required_cols if c in df.columns]]
+            required_cols = ["date", "open", "high", "low", "close", "volume"]
+            df = df[[c for c in required_cols if c in df.columns]]
 
-        df["symbol"] = symbol
-        df["name"] = name
+            df["symbol"] = symbol
+            df["name"] = name
 
-        return df
-    except Exception as e:
-        print(f"Error fetching index {symbol}: {e}")
-        return None
+            return df
+        except Exception as e:
+            error_msg = str(e)
+            # HTML 에러 페이지 응답은 간결하게 출력
+            if "<html>" in error_msg.lower():
+                error_msg = "KRX API 서버 에러 (HTML 에러 페이지 응답)"
+            if attempt < max_retries:
+                wait_sec = 10 * attempt
+                print(f"    [Retry {attempt}/{max_retries}] {error_msg}")
+                print(f"    {wait_sec}초 후 재시도...")
+                time.sleep(wait_sec)
+            else:
+                print(f"    [FAILED] {max_retries}회 시도 실패: {error_msg}")
+                return None
 
 
 def fetch_and_save_indices(start_date, end_date, engine):
@@ -223,7 +235,9 @@ def fetch_and_save_indices(start_date, end_date, engine):
     print("=" * 50)
 
     all_dfs = []
-    for symbol, name in INDEX_SYMBOLS.items():
+    for i, (symbol, name) in enumerate(INDEX_SYMBOLS.items()):
+        if i > 0:
+            time.sleep(2)  # 지수 간 요청 간격
         print(f"  Fetching {name} ({symbol})...")
         df = fetch_index_data(symbol, name, start_date, end_date)
         if df is not None:
@@ -318,10 +332,14 @@ def main():
     # Part 2: 시장 지수 데이터 수집
     # ========================================
 
+    # Yahoo Finance 소스 사용으로 KRX rate limit 영향 없음
+    print("\n지수 수집 준비 중...")
+    time.sleep(3)
+
     last_index_date = get_last_index_update_date(engine)
 
     if last_index_date is not None:
-        print(f"\nLast index data date in DB: {last_index_date.strftime('%Y-%m-%d')}")
+        print(f"Last index data date in DB: {last_index_date.strftime('%Y-%m-%d')}")
         if last_index_date.date() >= today_date:
             index_start_obj = datetime.combine(today_date, datetime.min.time())
             print(
@@ -331,10 +349,18 @@ def main():
         else:
             index_start_obj = last_index_date + timedelta(days=1)
     else:
-        # 지수 테이블이 없거나 비어있으면 stocks 테이블의 최초 날짜부터 수집
-        index_start_obj = last_date - timedelta(days=365)  # 넉넉히 1년 전부터
+        # 지수 테이블이 없거나 비어있으면 stocks 테이블의 최소 날짜부터 수집
+        try:
+            min_date_query = "SELECT MIN(date) FROM stocks"
+            min_date = pd.read_sql(min_date_query, engine).iloc[0, 0]
+            if min_date:
+                index_start_obj = pd.to_datetime(min_date)
+            else:
+                index_start_obj = last_date - timedelta(days=365)
+        except Exception:
+            index_start_obj = last_date - timedelta(days=365)
         print(
-            "\nNo existing index data. Collecting from 1 year before last stock date."
+            f"\nNo existing index data. Collecting from {index_start_obj.strftime('%Y-%m-%d')}"
         )
 
     if index_start_obj.date() > today_date:
