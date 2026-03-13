@@ -1,13 +1,11 @@
 import time
 import random
 import pandas as pd
-from pykrx import stock
+import FinanceDataReader as fdr
 from sqlalchemy import create_engine
 import multiprocessing
 from datetime import datetime
 from tqdm import tqdm
-
-# 데이터베이스 연결 정보
 import os
 from dotenv import load_dotenv
 
@@ -42,8 +40,9 @@ def get_stock_data(ticker, name, start_date, end_date):
         # 요청 과부하 방지를 위한 랜덤 지연
         time.sleep(random.uniform(0.1, 0.5))
 
-        # pykrx를 사용하여 일봉 데이터 가져오기
-        df = stock.get_market_ohlcv(start_date, end_date, ticker)
+        # FinanceDataReader를 사용하여 일봉 데이터 가져오기
+        # FDR은 날짜 형식을 'YYYY-MM-DD' 또는 'YYYYMMDD' 모두 지원
+        df = fdr.DataReader(ticker, start_date, end_date)
 
         # 데이터가 없는 경우 처리
         if df.empty:
@@ -53,31 +52,27 @@ def get_stock_data(ticker, name, start_date, end_date):
         df.index.name = "date"
         df = df.reset_index()
 
-        # 컬럼 이름 변경 (한글 -> 영문)
+        # 컬럼 이름 변경 (FDR: Open, High, Low, Close, Volume, Change 등) -> DB 스키마에 맞춤
         rename_map = {
-            "시가": "open",
-            "고가": "high",
-            "저가": "low",
-            "종가": "close",
-            "거래량": "volume",
-            "거래대금": "trading_value",
-            "등락률": "fluctuation_rate",
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume",
         }
         df = df.rename(columns=rename_map)
 
-        # 불필요한 컬럼 제거
-        cols_to_drop = ["trading_value", "fluctuation_rate"]
-        df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
+        # 필요한 컬럼만 선택
+        required_cols = ["date", "open", "high", "low", "close", "volume"]
+        df = df[[c for c in required_cols if c in df.columns]]
 
         # 티커 및 종목명 컬럼 추가
         df["ticker"] = ticker
         df["name"] = name
 
-        # 컬럼 이름 소문자로 변경
-        df.columns = [c.lower() for c in df.columns]
-
         return df
     except Exception as e:
+        # print(f"Error fetching {ticker}: {e}")
         return None
 
 
@@ -135,18 +130,27 @@ def save_batch_to_db(data_list, engine, is_first_batch):
 
 def main():
     # 1. 대상 종목 가져오기
-    date = datetime.now().strftime("%Y%m%d")
-    print("Fetching ticker list and names...")
+    date_str = datetime.now().strftime("%Y%m%d")
+    print("Fetching ticker list and names via FinanceDataReader(KRX)...")
 
-    # KOSPI
-    kospi_tickers = stock.get_market_ticker_list(date, market="KOSPI")
-    kospi_list = [(t, stock.get_market_ticker_name(t)) for t in kospi_tickers]
+    # FinanceDataReader는 통합 리스트 제공 (KRX = KOSPI + KOSDAQ + KONEX)
+    # 필요한 경우 시장별로 필터링 할 수 있으나, 기존 코드 흐름상 전체를 가져옴.
+    # 단, KONEX 제외 여부는 유저 요구사항에 없었으나, 기존 로직이 kospi+kosdaq이었으므로
+    # KRX 전체에서 Market 컬럼을 보고 필터링하는 것이 안전함.
 
-    # KOSDAQ
-    kosdaq_tickers = stock.get_market_ticker_list(date, market="KOSDAQ")
-    kosdaq_list = [(t, stock.get_market_ticker_name(t)) for t in kosdaq_tickers]
+    try:
+        df_krx = fdr.StockListing("KRX")
 
-    all_ticker_names = kospi_list + kosdaq_list
+        # KOSPI, KOSDAQ 만 필터링
+        df_filtered = df_krx[df_krx["Market"].isin(["KOSPI", "KOSDAQ"])]
+
+        # (Code, Name) 튜플 리스트 생성
+        all_ticker_names = list(zip(df_filtered["Code"], df_filtered["Name"]))
+        print(f"Total KOSPI+KOSDAQ tickers: {len(all_ticker_names)}")
+
+    except Exception as e:
+        print(f"Error fetching ticker list: {e}")
+        return
 
     # 테스트용 (주석 처리)
     # all_ticker_names = all_ticker_names[:30]
@@ -160,7 +164,7 @@ def main():
     start_date = user_input if user_input else default_start_date
 
     # 사용자가 종료 날짜를 입력하도록 변경 (기본값: 오늘)
-    default_end_date = date
+    default_end_date = date_str
     user_input_end = input(
         f"수집 종료 날짜를 입력하세요 (YYYYMMDD, 기본값: {default_end_date}): "
     ).strip()

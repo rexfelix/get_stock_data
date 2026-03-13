@@ -1,8 +1,8 @@
 import time
 import random
 import pandas as pd
-from pykrx import stock
-from sqlalchemy import create_engine
+import FinanceDataReader as fdr
+from sqlalchemy import create_engine, text
 import multiprocessing
 from datetime import datetime, timedelta
 from tqdm import tqdm
@@ -55,8 +55,8 @@ def get_stock_data(ticker, name, start_date, end_date):
         # 요청 과부하 방지를 위한 랜덤 지연
         time.sleep(random.uniform(0.1, 0.5))
 
-        # pykrx를 사용하여 일봉 데이터 가져오기
-        df = stock.get_market_ohlcv(start_date, end_date, ticker)
+        # FinanceDataReader를 사용하여 일봉 데이터 가져오기
+        df = fdr.DataReader(ticker, start_date, end_date)
 
         # 데이터가 없는 경우 처리
         if df.empty:
@@ -66,28 +66,23 @@ def get_stock_data(ticker, name, start_date, end_date):
         df.index.name = "date"
         df = df.reset_index()
 
-        # 컬럼 이름 변경 (한글 -> 영문)
+        # 컬럼 이름 변경 (FDR: Open, High, Low, Close, Volume)
         rename_map = {
-            "시가": "open",
-            "고가": "high",
-            "저가": "low",
-            "종가": "close",
-            "거래량": "volume",
-            "거래대금": "trading_value",
-            "등락률": "fluctuation_rate",
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume",
         }
         df = df.rename(columns=rename_map)
 
-        # 불필요한 컬럼 제거
-        cols_to_drop = ["trading_value", "fluctuation_rate"]
-        df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
+        # 필요한 컬럼만 선택
+        required_cols = ["date", "open", "high", "low", "close", "volume"]
+        df = df[[c for c in required_cols if c in df.columns]]
 
         # 티커 및 종목명 컬럼 추가
         df["ticker"] = ticker
         df["name"] = name
-
-        # 컬럼 이름 소문자로 변경
-        df.columns = [c.lower() for c in df.columns]
 
         return df
     except Exception as e:
@@ -141,6 +136,21 @@ def save_batch_to_db(data_list, engine):
         print(f"\nError saving batch: {e}")
 
 
+def delete_data_from_date(engine, table_name, from_date):
+    """특정 날짜 이후의 데이터를 삭제 (해당 날짜 포함)"""
+    try:
+        date_str = from_date.strftime("%Y-%m-%d")
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(f"DELETE FROM {table_name} WHERE date >= :target_date"),
+                {"target_date": date_str},
+            )
+            deleted = result.rowcount
+            print(f"  [{table_name}] {date_str} 이후 기존 데이터 {deleted}건 삭제")
+    except Exception as e:
+        print(f"  [{table_name}] 삭제 중 오류 (테이블 미존재 가능): {e}")
+
+
 def get_tickers_from_db(engine):
     """DB에서 유니크한 티커와 종목명 가져오기 (Fallback)"""
     try:
@@ -152,8 +162,94 @@ def get_tickers_from_db(engine):
         return []
 
 
+# ============================================================
+# 시장 지수 (KOSPI / KOSDAQ) 수집
+# ============================================================
+
+INDEX_SYMBOLS = {
+    "KS11": "KOSPI",
+    "KQ11": "KOSDAQ",
+}
+
+
+def get_last_index_update_date(engine):
+    """market_indices 테이블에서 가장 최근 날짜 조회"""
+    try:
+        query = "SELECT MAX(date) FROM market_indices"
+        last_date = pd.read_sql(query, engine).iloc[0, 0]
+        if last_date:
+            return pd.to_datetime(last_date)
+        return None
+    except Exception:
+        # 테이블이 아직 없는 경우
+        return None
+
+
+def fetch_index_data(symbol, name, start_date, end_date):
+    """단일 시장 지수의 OHLCV 데이터 수집"""
+    try:
+        df = fdr.DataReader(symbol, start_date, end_date)
+        if df.empty:
+            return None
+
+        df.index.name = "date"
+        df = df.reset_index()
+
+        rename_map = {
+            "Open": "open",
+            "High": "high",
+            "Low": "low",
+            "Close": "close",
+            "Volume": "volume",
+        }
+        df = df.rename(columns=rename_map)
+
+        required_cols = ["date", "open", "high", "low", "close", "volume"]
+        df = df[[c for c in required_cols if c in df.columns]]
+
+        df["symbol"] = symbol
+        df["name"] = name
+
+        return df
+    except Exception as e:
+        print(f"Error fetching index {symbol}: {e}")
+        return None
+
+
+def fetch_and_save_indices(start_date, end_date, engine):
+    """모든 시장 지수를 수집하여 market_indices 테이블에 저장"""
+    print("\n" + "=" * 50)
+    print("시장 지수 데이터 수집 시작 (KOSPI / KOSDAQ)")
+    print("=" * 50)
+
+    all_dfs = []
+    for symbol, name in INDEX_SYMBOLS.items():
+        print(f"  Fetching {name} ({symbol})...")
+        df = fetch_index_data(symbol, name, start_date, end_date)
+        if df is not None:
+            all_dfs.append(df)
+            print(f"    -> {len(df)} rows")
+        else:
+            print(f"    -> No data")
+
+    if not all_dfs:
+        print("지수 데이터가 없습니다.")
+        return
+
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+    try:
+        combined_df.to_sql("market_indices", engine, if_exists="append", index=False)
+        print(f"market_indices 테이블에 {len(combined_df)}건 저장 완료")
+    except Exception as e:
+        print(f"Error saving index data: {e}")
+
+
 def main():
     engine = get_db_engine()
+
+    # ========================================
+    # Part 1: 개별 종목 데이터 수집
+    # ========================================
 
     # 1. 마지막 업데이트 날짜 확인
     last_date = get_last_update_date(engine)
@@ -162,55 +258,93 @@ def main():
         print("No existing data found in DB. Please run get_stocks.py first.")
         return
 
-    print(f"Last data date in DB: {last_date.strftime('%Y-%m-%d')}")
-
-    # 2. 수집 시작 날짜 = 마지막 날짜 + 1일
-    start_date_obj = last_date + timedelta(days=1)
+    print(f"Last stock data date in DB: {last_date.strftime('%Y-%m-%d')}")
 
     # 종료 날짜 = 오늘
     end_date_obj = datetime.now()
-
-    if start_date_obj > end_date_obj:
-        print("Stock data is already up to date.")
-        return
-
-    start_date_str = start_date_obj.strftime("%Y%m%d")
     end_date_str = end_date_obj.strftime("%Y%m%d")
+    today_date = end_date_obj.date()
 
-    print(f"New data range: {start_date_str} ~ {end_date_str}")
+    # 2. 수집 시작 날짜 결정
+    #    - 마지막 데이터가 오늘이면: 오늘 데이터 삭제 후 오늘부터 재수집 (장중 갱신 대응)
+    #    - 그 외: 마지막 날짜 + 1일부터 수집
+    if last_date.date() >= today_date:
+        start_date_obj = datetime.combine(today_date, datetime.min.time())
+        print(f"\n[REFRESH] 오늘({today_date}) 데이터가 이미 존재 → 삭제 후 재수집")
+        delete_data_from_date(engine, "stocks", start_date_obj)
+    else:
+        start_date_obj = last_date + timedelta(days=1)
 
-    # 3. 대상 종목 가져오기 (Hybrid Mechanism)
-    print("Fetching ticker list and names...")
+    if start_date_obj.date() > today_date:
+        print("Stock data is already up to date.")
+    else:
+        start_date_str = start_date_obj.strftime("%Y%m%d")
+        print(f"New stock data range: {start_date_str} ~ {end_date_str}")
 
-    # KOSPI
-    kospi_tickers = stock.get_market_ticker_list(end_date_str, market="KOSPI")
-    kospi_list = [(t, stock.get_market_ticker_name(t)) for t in kospi_tickers]
+        # 3. 대상 종목 가져오기 (Hybrid Mechanism)
+        print("Fetching ticker list and names via FinanceDataReader(KRX)...")
 
-    # KOSDAQ
-    kosdaq_tickers = stock.get_market_ticker_list(end_date_str, market="KOSDAQ")
-    kosdaq_list = [(t, stock.get_market_ticker_name(t)) for t in kosdaq_tickers]
+        all_ticker_names = []
 
-    all_ticker_names = kospi_list + kosdaq_list
-    print(f"Tickers found via Pykrx: {len(all_ticker_names)}")
+        try:
+            df_krx = fdr.StockListing("KRX")
+            # KOSPI, KOSDAQ 만 필터링
+            df_filtered = df_krx[df_krx["Market"].isin(["KOSPI", "KOSDAQ"])]
+            all_ticker_names = list(zip(df_filtered["Code"], df_filtered["Name"]))
+            print(f"Tickers found via FDR: {len(all_ticker_names)}")
 
-    # Fallback: Pykrx가 0개를 반환하면 DB에서 가져옴
-    if len(all_ticker_names) == 0:
+        except Exception as e:
+            print(f"FDR Ticker Fetch Error: {e}")
+            # 실패 시 빈 리스트 유지 -> Fallback으로 넘어감
+
+        # Fallback: FDR이 0개를 반환하면 DB에서 가져옴
+        if len(all_ticker_names) == 0:
+            print(
+                "\n[WARNING] FDR returned 0 tickers (or failed). Switching to Fallback Mode (DB)..."
+            )
+            all_ticker_names = get_tickers_from_db(engine)
+            print(f"Tickers found via DB Fallback: {len(all_ticker_names)}")
+
+        if len(all_ticker_names) == 0:
+            print("\n[ERROR] No tickers found even from DB. Aborting stock fetch.")
+        else:
+            # 4. 실행
+            start_time = time.time()
+            fetch_and_save_data(all_ticker_names, start_date_str, end_date_str)
+            end_time = time.time()
+            print(f"Stock data execution time: {end_time - start_time:.2f} seconds")
+
+    # ========================================
+    # Part 2: 시장 지수 데이터 수집
+    # ========================================
+
+    last_index_date = get_last_index_update_date(engine)
+
+    if last_index_date is not None:
+        print(f"\nLast index data date in DB: {last_index_date.strftime('%Y-%m-%d')}")
+        if last_index_date.date() >= today_date:
+            index_start_obj = datetime.combine(today_date, datetime.min.time())
+            print(
+                f"[REFRESH] 오늘({today_date}) 지수 데이터가 이미 존재 → 삭제 후 재수집"
+            )
+            delete_data_from_date(engine, "market_indices", index_start_obj)
+        else:
+            index_start_obj = last_index_date + timedelta(days=1)
+    else:
+        # 지수 테이블이 없거나 비어있으면 stocks 테이블의 최초 날짜부터 수집
+        index_start_obj = last_date - timedelta(days=365)  # 넉넉히 1년 전부터
         print(
-            "\n[WARNING] Pykrx returned 0 tickers. Switching to Fallback Mode (DB)..."
+            "\nNo existing index data. Collecting from 1 year before last stock date."
         )
-        all_ticker_names = get_tickers_from_db(engine)
-        print(f"Tickers found via DB Fallback: {len(all_ticker_names)}")
 
-    if len(all_ticker_names) == 0:
-        print("\n[ERROR] No tickers found even from DB. Aborting.")
-        return
-
-    # 4. 실행
-    start_time = time.time()
-    fetch_and_save_data(all_ticker_names, start_date_str, end_date_str)
-    end_time = time.time()
-
-    print(f"Total execution time: {end_time - start_time:.2f} seconds")
+    if index_start_obj.date() > today_date:
+        print("Index data is already up to date.")
+    else:
+        index_start_str = index_start_obj.strftime("%Y%m%d")
+        start_time = time.time()
+        fetch_and_save_indices(index_start_str, end_date_str, engine)
+        end_time = time.time()
+        print(f"Index data execution time: {end_time - start_time:.2f} seconds")
 
 
 if __name__ == "__main__":
