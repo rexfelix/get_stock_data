@@ -3,3 +3,10 @@ __pycache__/
 *.pyc
 .DS_Store
 .gitignore
+rules/
+reference/
+docs/
+report/
+
+키움 REST API 문서.pdf
+
