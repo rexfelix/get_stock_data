@@ -1,30 +1,68 @@
 # 주식 데이터 센터 및 차트 대시보드 (Stock Data Center & Chart Dashboard)
 
-이 프로젝트는 KOSPI 및 KOSDAQ 전 종목의 일봉 데이터를 수집, 저장하고 이를 시각화하여 분석할 수 있는 로컬 데이터 플랫폼입니다. PostgreSQL 데이터베이스에 데이터를 저장하며, Streamlit을 통해 직관적인 차트 대시보드를 제공합니다.
+KOSPI/KOSDAQ 전 종목의 일봉 데이터와 테마/업종 정보를 수집, 저장하고 이를 시각화하여 분석할 수 있는 로컬 데이터 플랫폼입니다. PostgreSQL에 데이터를 저장하며, Streamlit 차트 대시보드와 터미널 기반 테마 편집 도구를 제공합니다.
 
-## 📁 주요 구성 파일
+## 📁 프로젝트 구조
 
-*   **`get_stocks.py`**: **초기 데이터 구축용**. 2024년 1월 1일부터 현재까지의 전 종목 OHLCV(시가, 고가, 저가, 종가, 거래량) 데이터를 수집하여 DB를 초기화합니다.
-*   **`add_daily_stocks.py`**: **일일 업데이트용**. DB에 저장된 마지막 날짜를 확인하고, 그 이후부터 오늘까지의 데이터를 추가로 수집하여 저장합니다.
-*   **`chart_test.py`**: **시각화 대시보드**. Streamlit을 이용하여 수집된 데이터를 차트로 보여줍니다. 캔들/하이킨아시 차트, 이동평균선, 볼린저밴드, 스무스드 하이킨아시 등의 지표를 자유롭게 설정할 수 있습니다.
-*   **`verify_stocks.py`**: **데이터 검증용**. 데이터베이스에 데이터가 정상적으로 저장되었는지 행 개수, 컬럼 등을 확인합니다.
+### 주가 데이터 수집
+
+| 파일 | 설명 |
+|------|------|
+| `get_stocks.py` | **초기 데이터 구축**. 전 종목 OHLCV 데이터를 수집하여 `stocks` 테이블 초기화 (멀티프로세싱 4코어, 배치 저장) |
+| `add_daily_stocks.py` | **일일 업데이트**. DB 마지막 날짜 이후 데이터 추가 수집 + `market_indices` 테이블에 KOSPI/KOSDAQ 지수 업데이트 |
+| `verify_stocks.py` | **데이터 검증**. 행 개수, 고유 티커 수, 컬럼 구조 등 DB 정합성 확인 |
+
+### 테마/업종 데이터 수집
+
+| 파일 | 설명 |
+|------|------|
+| `get_stock_themes.py` | **키움 REST API** 기반 테마/업종 수집. `themes` 테이블에 저장 (142개 테마그룹, 648종목) |
+| `scrape_naver_themes.py` | **네이버 증권 테마 스크래핑**. 전체 테마별 구성 종목을 수집하여 CSV 생성 (~2,397 종목) |
+| `add_summary_to_themes.py` | `themes` 테이블에 기업 요약(summary) 컬럼 추가 및 CSV 데이터 매핑 |
+
+### 시각화 및 편집 도구
+
+| 파일 | 설명 |
+|------|------|
+| `chart_test.py` | **Streamlit 대시보드**. 캔들/하이킨아시 차트, MA, 볼린저밴드, 스무스드 하이킨아시 지표 |
+| `theme_edit.py` | **터미널 UI (Textual)**. 테마/요약 정보를 검색하고 개별/일괄 편집하는 TUI 앱 |
+
+### 유틸리티
+
+| 파일 | 설명 |
+|------|------|
+| `debug_issue.py` | 데이터 수집 이슈 디버깅 (DB 최신일자, pykrx 데이터 확인 등) |
+
+## 📦 데이터베이스 스키마
+
+| 테이블 | 컬럼 | 설명 |
+|--------|-------|------|
+| `stocks` | ticker, name, date, open, high, low, close, volume | 전 종목 일봉 데이터 |
+| `market_indices` | symbol, name, date, open, high, low, close, volume | KOSPI/KOSDAQ 지수 |
+| `themes` | ticker, name, themes, sector, summary | 종목별 테마, 업종, 기업 요약 |
+
+## 📄 데이터 파일 (CSV)
+
+| 파일 | 설명 |
+|------|------|
+| `korean_stock_company_summaries.csv` | 기업 요약 데이터 (2,794종목) |
+| `naver_themes.csv` | 네이버 증권 테마-종목 매핑 원본 (6,511건) |
+| `naver_themes_by_ticker.csv` | 티커별 네이버 테마 집계 (2,397종목) |
 
 ## 🛠️ 설치 및 환경 설정
 
-### 1. 필수 요구사항
+### 필수 요구사항
 *   **Python 3.x**
-*   **PostgreSQL**: 로컬 또는 원격 서버에 PostgreSQL이 설치되어 실행 중이어야 합니다.
+*   **PostgreSQL**
 
-### 2. 라이브러리 설치
-필요한 Python 라이브러리를 설치합니다.
+### 라이브러리 설치
 ```bash
-pip install pandas sqlalchemy psycopg2-binary pykrx streamlit plotly tqdm python-dotenv
+pip install pandas sqlalchemy psycopg2-binary pykrx streamlit plotly tqdm python-dotenv FinanceDataReader requests beautifulsoup4 textual
 ```
 
-### 3. 환경 변수 설정
-프로젝트 루트 경로에 `.env` 파일을 생성하고 데이터베이스 접속 정보를 입력합니다. (GitHub 등 공개된 곳에 이 파일이 업로드되지 않도록 주의하세요)
+### 환경 변수 설정
+프로젝트 루트에 `.env` 파일을 생성합니다.
 
-**.env 예시**
 ```env
 DB_HOST="localhost"
 DB_PORT="5432"
@@ -33,34 +71,46 @@ DB_USER="사용자명"
 DB_PASSWORD="비밀번호"
 ```
 
+키움 REST API 사용 시 추가 설정이 필요합니다:
+```env
+KIWOOM_APP_KEY="앱키"
+KIWOOM_APP_SECRET="앱시크릿"
+```
+
 ## 🚀 사용 방법
 
 ### 1단계: 초기 데이터 구축
-프로젝트를 처음 시작할 때 실행합니다.
-*   실행 시 **수집 시작 날짜**와 **수집 종료 날짜**를 입력할 수 있습니다. (기본값: 20240101 ~ 오늘)
-*   이 명령어를 실행하면 DB에 `stocks` 테이블이 없는 경우 **자동으로 생성**됩니다. 별도로 테이블을 만들 필요가 없습니다.
-*   **주의**: 이미 데이터가 있는 경우, 기존 데이터를 삭제하고 새로 구축합니다.
 ```bash
-python get_stocks.py
+python get_stocks.py          # 전 종목 OHLCV 수집 (기본: 2019-01-01 ~ 오늘)
 ```
 
 ### 2단계: 일일 데이터 업데이트
-매일 장 마감 후 실행하여 최신 데이터를 DB에 추가합니다.( 매일이 아니어도 상관없음)
 ```bash
-python add_daily_stocks.py
+python add_daily_stocks.py    # 최신 주가 + 시장 지수 업데이트
 ```
 
-### 3단계: 대시보드 실행
-웹 브라우저에서 차트를 확인합니다.
+### 3단계: 테마/업종 데이터 수집
 ```bash
-streamlit run chart_test.py
+python get_stock_themes.py    # 키움 API로 테마/업종 수집
+python scrape_naver_themes.py # 네이버 증권 테마 스크래핑
+python add_summary_to_themes.py  # 기업 요약 추가
+```
+
+### 4단계: 대시보드 실행
+```bash
+streamlit run chart_test.py   # 웹 차트 대시보드
+```
+
+### 테마 편집
+```bash
+python theme_edit.py          # 터미널 UI로 테마/요약 편집
 ```
 
 ## 📊 대시보드 주요 기능
-*   **종목 검색**: 한글 종목명 또는 티커 코드로 검색 지원
-*   **차트 모드**: 일반 캔들(Candle) 및 하이킨아시(Heikin-Ashi) 차트 전환
-*   **기술적 지표 (설정 사이드바)**:
-    *   **이동평균선(MA)**: 기간, 색상, 굵기를 커스터마이징하여 여러 개 추가 가능
-    *   **볼린저밴드(BB)**: 기간, 승수(k), 색상, 상/하한선 표시 여부 설정 가능
-    *   **스무스드 하이킨아시(SHA)**: 추세 파악을 위한 SHA 보조 지표 오버레이 지원
-*   **인터랙티브 기능**: 차트 확대/축소, 패닝(이동), 마우스 오버 시 상세 정보 표시
+*   **종목 검색**: 한글 종목명 또는 티커 코드로 검색
+*   **차트 모드**: 캔들(Candle) / 하이킨아시(Heikin-Ashi) 전환
+*   **기술적 지표**:
+    *   이동평균선(MA) - 기간, 색상, 굵기 커스터마이징
+    *   볼린저밴드(BB) - 기간, 승수(k), 상/하한선 설정
+    *   스무스드 하이킨아시(SHA) - 추세 파악용 오버레이
+*   **인터랙티브**: 확대/축소, 패닝, 마우스 오버 상세 정보

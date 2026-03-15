@@ -148,6 +148,11 @@ class StockCard(Widget):
         self.themes_text = themes
         self.summary_text = summary
 
+    def _calc_height(self, text: str, min_lines: int = 1) -> int:
+        """텍스트 줄 수 기반 높이 계산 (최소 min_lines)"""
+        lines = max(text.count("\n") + 1, min_lines)
+        return lines + 1  # border/padding 보정
+
     def compose(self) -> ComposeResult:
         total = len(self.themes_text) + len(self.summary_text)
         yield Static(
@@ -155,15 +160,30 @@ class StockCard(Widget):
             classes="stock-header",
         )
         yield Label("Themes:", classes="field-label")
-        yield TextArea(self.themes_text, id=f"themes-{self.ticker}", soft_wrap=True)
+        ta_themes = TextArea(self.themes_text, id=f"themes-{self.ticker}", soft_wrap=True)
+        ta_themes.styles.height = self._calc_height(self.themes_text)
+        yield ta_themes
         yield Label("Summary:", classes="field-label")
-        yield TextArea(self.summary_text, id=f"summary-{self.ticker}", soft_wrap=True)
+        ta_summary = TextArea(self.summary_text, id=f"summary-{self.ticker}", soft_wrap=True)
+        ta_summary.styles.height = self._calc_height(self.summary_text)
+        yield ta_summary
         yield Static(f"{total} / {MAX_LENGTH}", id=f"count-{self.ticker}", classes="char-count")
         with Horizontal(classes="card-buttons"):
             yield Button("저장", id=f"save-{self.ticker}", variant="success")
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         self._update_count()
+        self._update_heights()
+
+    def _update_heights(self) -> None:
+        """TextArea 높이를 내용에 맞게 조정"""
+        try:
+            ta_themes = self.query_one(f"#themes-{self.ticker}", TextArea)
+            ta_themes.styles.height = self._calc_height(ta_themes.text)
+            ta_summary = self.query_one(f"#summary-{self.ticker}", TextArea)
+            ta_summary.styles.height = self._calc_height(ta_summary.text)
+        except Exception:
+            pass
 
     def _update_count(self) -> None:
         try:
