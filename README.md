@@ -10,6 +10,7 @@ KOSPI/KOSDAQ 전 종목의 일봉 데이터와 테마/업종 정보를 수집, �
 |------|------|
 | `get_stocks.py` | **초기 데이터 구축**. 전 종목 OHLCV 데이터를 수집하여 `stocks` 테이블 초기화 (멀티프로세싱 4코어, 배치 저장) |
 | `add_daily_stocks.py` | **일일 업데이트**. DB 마지막 날짜 이후 데이터 추가 수집 + `market_indices` 테이블에 KOSPI/KOSDAQ 지수 업데이트 |
+| `get_stock_all.py` | **종합 데이터 수집 (키움 REST API)**. 전 종목 일봉 OHLCV + 거래대금 + 투자자별 순매수를 `stock_all` 테이블에 저장 |
 | `verify_stocks.py` | **데이터 검증**. 행 개수, 고유 티커 수, 컬럼 구조 등 DB 정합성 확인 |
 
 ### 테마/업종 데이터 수집
@@ -40,6 +41,32 @@ KOSPI/KOSDAQ 전 종목의 일봉 데이터와 테마/업종 정보를 수집, �
 | `stocks` | ticker, name, date, open, high, low, close, volume | 전 종목 일봉 데이터 |
 | `market_indices` | symbol, name, date, open, high, low, close, volume | KOSPI/KOSDAQ 지수 |
 | `themes` | ticker, name, themes, sector, summary | 종목별 테마, 업종, 기업 요약 |
+| `trading_details` | ticker, date, close, volume, trading_value, foreign_net, inst_net, foreign_ratio | 일별 거래대금 + 기관/외인 순매수 (ka10015+ka10045) |
+| `stock_all` | ticker, name, date, open, high, low, close, amount, volume, 외국인, 개인, 기관계 | 종합 일봉 + 투자자별 순매수 (ka10081+ka10060) |
+
+### `stock_all` 테이블 상세
+
+전 종목의 일봉 OHLCV, 거래대금, 투자자별 순매수 데이터를 하나의 테이블에 통합한 종합 데이터입니다.
+
+| 컬럼 | 타입 | 설명 | API 출처 |
+|------|------|------|----------|
+| `ticker` | VARCHAR(20) | 종목코드 (PK) | stocks 테이블 |
+| `name` | VARCHAR(100) | 종목명 | stocks 테이블 |
+| `date` | DATE | 날짜 (PK) | ka10081 `dt` |
+| `open` | BIGINT | 시가 | ka10081 `open_pric` |
+| `high` | BIGINT | 고가 | ka10081 `high_pric` |
+| `low` | BIGINT | 저가 | ka10081 `low_pric` |
+| `close` | BIGINT | 종가 | ka10081 `cur_prc` |
+| `amount` | BIGINT | 거래대금 (백만원) | ka10081 `trde_prica` |
+| `volume` | BIGINT | 거래량 (주) | ka10081 `trde_qty` |
+| `외국인` | BIGINT | 외국인 순매수 (주) | ka10060 `frgnr_invsr` |
+| `개인` | BIGINT | 개인 순매수 (주) | ka10060 `ind_invsr` |
+| `기관계` | BIGINT | 기관계 순매수 (주) | ka10060 `orgn` |
+
+**데이터 범위:**
+- ka10081 (일봉): 1회 호출 시 기준일 기준 과거 **600 거래일** 반환 (약 2.5년)
+- ka10060 (투자자): 1회 호출 시 기준일 기준 과거 **100 거래일** 반환 (약 5개월)
+- 투자자 데이터가 없는 날짜의 외국인/개인/기관계 값은 NULL
 
 ## 📄 데이터 파일 (CSV)
 
@@ -89,14 +116,24 @@ python get_stocks.py          # 전 종목 OHLCV 수집 (기본: 2019-01-01 ~ �
 python add_daily_stocks.py    # 최신 주가 + 시장 지수 업데이트
 ```
 
-### 3단계: 테마/업종 데이터 수집
+### 3단계: 종합 데이터 수집 (키움 REST API)
+
+```bash
+python get_stock_all.py       # 전 종목 일봉 + 거래대금 + 투자자별 순매수 수집
+```
+
+- **첫 실행**: `stock_all` 테이블 생성 → 과거 600거래일 전체 수집 (종목당 API 2회, 약 30분 소요)
+- **재실행**: DB 최종일 이후 ~ 오늘 데이터만 증분 수집
+- **당일 재실행**: 오늘 데이터 삭제 후 재수집 (장중 갱신용)
+
+### 4단계: 테마/업종 데이터 수집
 ```bash
 python get_stock_themes.py    # 키움 API로 테마/업종 수집
 python scrape_naver_themes.py # 네이버 증권 테마 스크래핑
 python add_summary_to_themes.py  # 기업 요약 추가
 ```
 
-### 4단계: 대시보드 실행
+### 5단계: 대시보드 실행
 ```bash
 streamlit run chart_test.py   # 웹 차트 대시보드
 ```
