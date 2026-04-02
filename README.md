@@ -21,6 +21,15 @@ KOSPI/KOSDAQ 전 종목의 일봉 데이터와 테마/업종 정보를 수집, �
 | `scrape_naver_themes.py` | **네이버 증권 테마 스크래핑**. 전체 테마별 구성 종목을 수집하여 CSV 생성 (~2,397 종목) |
 | `add_summary_to_themes.py` | `themes` 테이블에 기업 요약(summary) 컬럼 추가 및 CSV 데이터 매핑 |
 
+### 재무데이터 크롤링 (네이버 증권)
+
+| 파일 | 설명 |
+|------|------|
+| `crawl_financial_summary.py` | **Financial Summary** (cF1002). 매출액, 영업이익, EPS, PER, PBR, ROE 등 → `financial_summary` 테이블 (UPSERT) |
+| `crawl_financial.py` | **연간+분기 재무데이터** (cF3002+cF4002). 손익계산서 + 재무비율 → `financial_annual` 테이블 (quarter=0: 연간, 1~4: 분기) |
+| `crawl_consensus.py` | **투자의견 컨센서스** (c1010001). 목표주가, 제공처별 의견 → `consensus_summary`, `consensus_provider` 테이블 + `financial_summary` PCR/BPS/DPS 업데이트 |
+| `run_financial_crawl.py` | **통합 실행**. 위 3개 스크립트를 순서대로 실행 |
+
 ### 시각화 및 편집 도구
 
 | 파일 | 설명 |
@@ -43,6 +52,10 @@ KOSPI/KOSDAQ 전 종목의 일봉 데이터와 테마/업종 정보를 수집, �
 | `themes` | ticker, name, themes, sector, summary | 종목별 테마, 업종, 기업 요약 |
 | `trading_details` | ticker, date, close, volume, trading_value, foreign_net, inst_net, foreign_ratio | 일별 거래대금 + 기관/외인 순매수 (ka10015+ka10045) |
 | `stock_all` | ticker, name, date, open, high, low, close, amount, volume, 외국인, 개인, 기관계 | 종합 일봉 + 투자자별 순매수 (ka10081+ka10060) |
+| `financial_summary` | ticker, year, is_estimate, revenue, operating_income, eps, per, pbr, roe, ev_ebitda, pcr, bps, dps, dividend_yield 등 | Financial Summary 연간 (cF1002) |
+| `financial_annual` | ticker, year, quarter, revenue, operating_income, net_income, eps, roe, roa, roic 등 25개 컬럼 | 연간+분기 손익계산서+재무비율 (cF3002+cF4002) |
+| `consensus_summary` | ticker, rating, target_price, eps, per, analyst_count | 투자의견 컨센서스 요약 |
+| `consensus_provider` | ticker, provider, report_date, target_price, prev_target, change_pct, opinion | 제공처별 투자의견 |
 
 ### `stock_all` 테이블 상세
 
@@ -133,7 +146,19 @@ python scrape_naver_themes.py # 네이버 증권 테마 스크래핑
 python add_summary_to_themes.py  # 기업 요약 추가
 ```
 
-### 5단계: 대시보드 실행
+### 5단계: 재무데이터 수집 (네이버 증권)
+```bash
+python run_financial_crawl.py   # 3개 크롤러 통합 실행
+```
+또는 개별 실행:
+```bash
+python crawl_financial_summary.py  # Financial Summary (cF1002)
+python crawl_financial.py          # 연간+분기 재무데이터 (cF3002+cF4002)
+python crawl_consensus.py          # 컨센서스 + 주요지표 (c1010001)
+```
+
+### 6단계: 대시보드 실행
+
 ```bash
 streamlit run chart_test.py   # 웹 차트 대시보드
 ```
