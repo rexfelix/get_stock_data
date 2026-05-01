@@ -352,6 +352,121 @@ def fetch_and_save_indices(start_date, end_date, engine):
         print(f"Error saving index data: {e}")
 
 
+# ============================================================
+# amount 일일 업데이트 (키움 ka10081)
+# ============================================================
+
+
+def compute_start_date(last_date, today):
+    """업데이트 시작 날짜 결정.
+
+    last_date 를 그대로 반환 — 마지막 날을 포함하여 재수집한다.
+    호출자는 start_date 부터 DELETE 후 재수집해야 한다.
+    """
+    return last_date
+
+
+def filter_records_by_date_range(records, start, end):
+    """[start, end] 양 끝 포함 구간 필터."""
+    s = pd.Timestamp(start)
+    e = pd.Timestamp(end)
+    return [r for r in records if s <= r[1] <= e]
+
+
+def parse_amount(raw_value):
+    """ka10081 trde_prica 파싱 — 콤마/부호 제거. None/빈/invalid → None."""
+    if raw_value is None or raw_value == "":
+        return None
+    try:
+        s = str(raw_value).replace("+", "").replace(",", "")
+        return int(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def build_amount_records(api_rows, ticker):
+    """ka10081 응답 rows 를 (ticker, Timestamp, amount) 리스트로."""
+    records = []
+    for row in api_rows:
+        dt_str = row.get("dt", "")
+        if not dt_str:
+            continue
+        try:
+            dt = pd.Timestamp(f"{dt_str[:4]}-{dt_str[4:6]}-{dt_str[6:8]}")
+        except Exception:
+            continue
+        amt = parse_amount(row.get("trde_prica"))
+        records.append((ticker, dt, amt))
+    return records
+
+
+def fetch_ka10081(token, ticker, base_dt):
+    """ka10081 주식일봉차트조회. base_dt 기준 과거 600일치."""
+    url = f"{KIWOOM_DOMAIN}/api/dostk/chart"
+    headers = {
+        "Content-Type": "application/json;charset=UTF-8",
+        "api-id": "ka10081",
+        "authorization": f"Bearer {token}",
+    }
+    body = {"stk_cd": ticker, "base_dt": base_dt, "upd_stkpc_tp": "1"}
+    time.sleep(0.3)
+    try:
+        r = requests.post(url, json=body, headers=headers, timeout=15)
+        data = r.json()
+    except Exception:
+        return []
+    if data.get("return_code") != 0:
+        return []
+    return data.get("stk_dt_pole_chart_qry", [])
+
+
+def bulk_update_stocks_amount(records):
+    """records: [(ticker, Timestamp, amount), ...] → stocks.amount UPDATE.
+
+    amount None 인 행은 skip. 반환: 업데이트 행 수.
+    """
+    if not records:
+        return 0
+    engine = get_db_engine()
+    n = 0
+    with engine.begin() as conn:
+        for ticker, dt, amt in records:
+            if amt is None:
+                continue
+            conn.execute(
+                text("UPDATE stocks SET amount = :a WHERE ticker = :t AND date = :d"),
+                {"a": int(amt), "t": ticker, "d": dt},
+            )
+            n += 1
+    return n
+
+
+def update_amount_for_period(token, tickers, start_date, end_date, max_workers=3):
+    """[start_date, end_date] 구간의 amount 를 키움 ka10081 로 수집해 UPDATE.
+
+    각 ticker 에 대해 base_dt=end_date 로 1회 호출. ThreadPoolExecutor 로 병렬화
+    (기본 max_workers=3, 키움 rate limit 안전 마진).
+    반환: 총 업데이트 행 수.
+    """
+    base_dt = end_date.replace("-", "")
+
+    def _process_one(ticker):
+        rows = fetch_ka10081(token, ticker, base_dt)
+        if not rows:
+            return 0
+        records = build_amount_records(rows, ticker)
+        records = filter_records_by_date_range(records, start_date, end_date)
+        return bulk_update_stocks_amount(records)
+
+    n_total = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for i, n in enumerate(ex.map(_process_one, tickers), 1):
+            n_total += n
+            if i % 200 == 0:
+                print(f"    [{i:4}/{len(tickers)}] amount UPDATE 누적 {n_total:,}건")
+    return n_total
+
+
 def main():
     engine = get_db_engine()
 
@@ -373,15 +488,11 @@ def main():
     end_date_str = end_date_obj.strftime("%Y%m%d")
     today_date = end_date_obj.date()
 
-    # 2. 수집 시작 날짜 결정
-    #    - 마지막 데이터가 오늘이면: 오늘 데이터 삭제 후 오늘부터 재수집 (장중 갱신 대응)
-    #    - 그 외: 마지막 날짜 + 1일부터 수집
-    if last_date.date() >= today_date:
-        start_date_obj = datetime.combine(today_date, datetime.min.time())
-        print(f"\n[REFRESH] 오늘({today_date}) 데이터가 이미 존재 → 삭제 후 재수집")
-        delete_data_from_date(engine, "stocks", start_date_obj)
-    else:
-        start_date_obj = last_date + timedelta(days=1)
+    # 2. 수집 시작 날짜 결정 — 마지막 날 포함 재수집 (오늘이 마지막 날이라도 다시 받아옴)
+    today_obj = datetime.combine(today_date, datetime.min.time())
+    start_date_obj = compute_start_date(last_date, today_obj)
+    print(f"\n[REFRESH] {start_date_obj.strftime('%Y-%m-%d')} 부터 데이터 삭제 후 재수집")
+    delete_data_from_date(engine, "stocks", start_date_obj)
 
     if start_date_obj.date() > today_date:
         print("Stock data is already up to date.")
@@ -397,11 +508,26 @@ def main():
         if len(all_ticker_names) == 0:
             print("\n[ERROR] No tickers found from Kiwoom or DB. Aborting stock fetch.")
         else:
-            # 4. 실행
+            # 4. OHLCV 수집 (FDR)
             start_time = time.time()
             fetch_and_save_data(all_ticker_names, start_date_str, end_date_str)
             end_time = time.time()
-            print(f"Stock data execution time: {end_time - start_time:.2f} seconds")
+            print(f"OHLCV execution time: {end_time - start_time:.2f} seconds")
+
+            # 5. amount 수집 (Kiwoom ka10081)
+            print("\nUpdating amount via Kiwoom ka10081...")
+            try:
+                token = get_kiwoom_token()
+                only_tickers = [t for t, _ in all_ticker_names]
+                amt_t0 = time.time()
+                n_updated = update_amount_for_period(
+                    token, only_tickers,
+                    start_date_obj.strftime("%Y-%m-%d"),
+                    end_date_obj.strftime("%Y-%m-%d"),
+                )
+                print(f"Amount UPDATE: {n_updated:,}건 ({time.time()-amt_t0:.1f}s)")
+            except Exception as e:
+                print(f"[WARN] Amount 수집 실패 (OHLCV는 정상 저장): {e}")
 
     # ========================================
     # Part 2: 시장 지수 데이터 수집
