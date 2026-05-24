@@ -464,8 +464,8 @@ def build_report(initial_capital, final_value, trades_df, port_df, benchmark,
     L.append(f"- 유니버스: **KOSPI200** (네이버 entryJongmok)")
     L.append(f"- 지수: **^KS11 (KOSPI)** — DB에 KOSPI200 별도 미보유, KOSPI를 프록시로 사용")
     L.append(f"- 매매 규칙: 매주 금요일 종가 기준 5일 수익률 RS 계산 → 다음 영업일 시가에 진입/청산")
-    L.append(f"- **RS = (1 + r_종목) / (1 + r_지수) − 1** "
-             f"(사용자 공식 `r_종목/r_지수 − 1`은 r_지수≤0에서 정의 불가하여 동일 의도의 표준식으로 치환)")
+    L.append(f"- **RS = (종목 현재가/N일전가) / (지수 현재값/N일전값) − 1 = (1 + r_종목) / (1 + r_지수) − 1**  "
+             f"(두 표현 수학적 동일)")
     L.append(f"- 풀 크기: 상위 **{TOP_N}**, 슬롯 **{SLOTS}** 동일가중")
     L.append(f"- 비용: 매수 {FEE_BUY*100:.3f}% / 매도 {FEE_SELL*100:.3f}% / 세금 {TAX_SELL*100:.2f}%")
     L.append(f"- 레짐: KOSPI 60일 누적수익률 ≥ +{REGIME_UP_TH*100:.0f}% UP / ≤ {REGIME_DN_TH*100:.0f}% DOWN / 그 외 SIDEWAYS\n")
@@ -669,14 +669,12 @@ def build_report(initial_capital, final_value, trades_df, port_df, benchmark,
     L.append("- **풀 크기 분리**: 매수 Top10, 매도 Top30 탈락 — 회전 감소 (hysteresis)")
     L.append("- **거래대금/거래대금 회전율 필터**: 유동성 큰 종목만 (대기업 RS top은 보유 지속성 ↑)\n")
 
-    L.append("### 7-5. 사용자 공식 vs 표준 RS 식 차이\n")
-    L.append("- 사용자 원공식: `RS = r_종목 / r_지수 − 1`")
-    L.append("  - r_지수 > 0: r_종목에 대해 단조 증가 → 본 백테스트 표준식과 **랭킹 동일**, Top10 멤버 일치")
-    L.append("  - r_지수 = 0: 0으로 나눔, 정의 불가")
-    L.append("  - r_지수 < 0: r_종목에 대해 **단조 감소**로 부호 반전 → 많이 오른 종목이 낮은 RS, 많이 빠진 종목이 높은 RS (역설적)")
-    L.append("- 본 백테스트는 의도(시장 대비 초과수익)를 보존하는 표준 가격비식 적용: `(1 + r_종목) / (1 + r_지수) − 1`")
-    L.append("- 따라서 약세장(r_지수 < 0) 주에서는 두 식의 Top10 결과가 달라질 수 있음. 본 결과는 표준식 기준이며,")
-    L.append("  원공식을 그대로 쓸 경우 약세장 매주 손실 종목을 매수하는 비논리적 거동이 발생함을 주의.")
+    L.append("### 7-5. 사용된 RS 공식\n")
+    L.append("- 사용자 정의: `RS = (종목 현재가 / 종목 N일전가) / (지수 현재값 / 지수 N일전값) − 1`")
+    L.append("- 본 백테스트 적용: `RS = (1 + r_종목) / (1 + r_지수) − 1`")
+    L.append("- 두 표현은 **수학적으로 동일** (가격비 = 1 + 단순수익률):")
+    L.append("    `(P_s_t / P_s_{t-N}) / (P_i_t / P_i_{t-N}) − 1 = (1 + r_종목) / (1 + r_지수) − 1`")
+    L.append("- 따라서 본 결과는 사용자 정의식 그대로의 백테스트 결과이며, 변환에 의한 의미 차이는 없음.")
     L.append("")
 
     L.append(f"---\n실행시간: {elapsed:.1f}초  \n생성: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
