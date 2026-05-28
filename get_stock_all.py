@@ -1,6 +1,7 @@
 import time
 import requests
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy import create_engine, text
 from datetime import datetime, timedelta
 from tqdm import tqdm
@@ -95,7 +96,7 @@ def fetch_ka10081(token, ticker, base_dt):
     }
 
     time.sleep(0.3)
-    response = requests.post(url, json=body, headers=req_headers)
+    response = requests.post(url, json=body, headers=req_headers, timeout=15)
     data = response.json()
 
     if data.get("return_code") != 0:
@@ -129,7 +130,7 @@ def fetch_ka10060(token, ticker, dt):
     }
 
     time.sleep(0.3)
-    response = requests.post(url, json=body, headers=req_headers)
+    response = requests.post(url, json=body, headers=req_headers, timeout=15)
     data = response.json()
 
     if data.get("return_code") != 0:
@@ -321,41 +322,54 @@ def main():
     # 4. 토큰 발급
     token = get_kiwoom_token()
 
-    # 5. 수집 시작
+    # 5. 수집 시작 (ThreadPoolExecutor 병렬)
     start_time = time.time()
     BATCH_SIZE = 50
+    MAX_WORKERS = 3  # 키움 rate limit 안전 마진 (add_daily_stocks.py와 동일)
     buffer = []
     total_saved = 0
     errors = 0
 
-    for ticker, name in tqdm(ticker_names, desc="stock_all 수집", unit="stock"):
+    cutoff_dt = (
+        pd.to_datetime(cutoff_date_str, format="%Y%m%d") if cutoff_date_str else None
+    )
+
+    def process_one(item):
+        """종목 1개의 ka10081 + ka10060 을 수집해 DataFrame 반환 (워커 스레드)."""
+        ticker, name = item
         try:
-            # ka10081: 일봉 OHLCV (base_dt=오늘, 과거방향)
             ka81_rows = fetch_ka10081(token, ticker, today_str)
-
-            # ka10060: 투자자별 순매수 (dt=오늘, 과거방향)
             ka60_rows = fetch_ka10060(token, ticker, today_str)
-
             df = build_dataframe(ticker, name, ka81_rows, ka60_rows)
-            if df is not None and not df.empty:
-                # 증분 업데이트: cutoff 이후 데이터만 필터링
-                if cutoff_date_str:
-                    cutoff_dt = pd.to_datetime(cutoff_date_str, format="%Y%m%d")
-                    df = df[df["date"] >= cutoff_dt]
+            if df is not None and not df.empty and cutoff_dt is not None:
+                df = df[df["date"] >= cutoff_dt]
+            return ("ok", ticker, df)
+        except Exception as e:
+            return ("error", ticker, e)
 
-                if not df.empty:
-                    buffer.append(df)
+    # 워커 스레드는 fetch만 수행하고, DB 저장은 메인 스레드에서만 처리 (동시 쓰기 방지)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        for status, ticker, payload in tqdm(
+            executor.map(process_one, ticker_names),
+            total=len(ticker_names),
+            desc="stock_all 수집",
+            unit="stock",
+        ):
+            if status == "error":
+                errors += 1
+                if errors <= 5:
+                    print(f"\n  [{ticker}] 오류: {payload}")
+                elif errors == 6:
+                    print("\n  (이후 오류는 생략합니다)")
+                continue
+
+            df = payload
+            if df is not None and not df.empty:
+                buffer.append(df)
 
             if len(buffer) >= BATCH_SIZE:
                 total_saved += save_batch_to_db(buffer, engine)
                 buffer = []
-
-        except Exception as e:
-            errors += 1
-            if errors <= 5:
-                print(f"\n  [{ticker}] 오류: {e}")
-            elif errors == 6:
-                print("\n  (이후 오류는 생략합니다)")
 
     # 남은 데이터 저장
     if buffer:
