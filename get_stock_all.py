@@ -53,14 +53,12 @@ def get_kiwoom_token():
 
 
 def get_tickers_from_db(engine):
-    """stocks 테이블에서 유니크한 (ticker, name) 목록 가져오기"""
-    query = """
-        SELECT DISTINCT ON (ticker) ticker, name
-        FROM stocks
-        ORDER BY ticker, date DESC
+    """현재 상장 종목 (ticker, name) 목록을 stock_master 에서 가져오기.
+
+    stock_master 가 없거나 비어있으면 stocks 테이블로 fallback (헬퍼 내부 처리).
     """
-    df = pd.read_sql(query, engine)
-    return list(zip(df["ticker"], df["name"]))
+    import stock_master
+    return stock_master.get_listed_tickers(engine)
 
 
 def parse_int(val):

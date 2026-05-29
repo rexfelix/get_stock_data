@@ -27,9 +27,10 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleW
 
 
 def get_all_tickers() -> pd.DataFrame:
-    query = text("SELECT DISTINCT ticker, name FROM stocks ORDER BY ticker")
-    with ENGINE.connect() as conn:
-        return pd.read_sql(query, conn)
+    """현재 상장 종목(stock_master)만 대상. 없으면 stocks 로 fallback."""
+    import stock_master
+    rows = stock_master.get_listed_tickers(ENGINE)
+    return pd.DataFrame(rows, columns=["ticker", "name"])
 
 
 def ensure_tables():

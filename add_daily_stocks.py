@@ -11,6 +11,8 @@ from tqdm import tqdm
 import os
 from dotenv import load_dotenv
 
+import stock_master
+
 # 환경변수 로드
 script_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(script_dir, ".env")
@@ -158,19 +160,9 @@ def delete_data_from_date(engine, table_name, from_date):
         print(f"  [{table_name}] 삭제 중 오류 (테이블 미존재 가능): {e}")
 
 
-def get_tickers_from_db(engine):
-    """DB에서 유니크한 티커와 종목명 가져오기 (Fallback)"""
-    try:
-        query = "SELECT DISTINCT ticker, name FROM stocks"
-        df = pd.read_sql(query, engine)
-        return list(zip(df["ticker"], df["name"]))
-    except Exception as e:
-        print(f"Error fetching tickers from DB: {e}")
-        return []
-
-
 # ============================================================
-# 키움 REST API 기반 티커 수집 (FDR 차단 우회)
+# 키움 REST API 토큰 (amount 수집 ka10081 용)
+# 종목 유니버스 수집/동기화는 stock_master 모듈로 이관됨
 # ============================================================
 
 
@@ -191,69 +183,6 @@ def get_kiwoom_token():
     if data.get("return_code") != 0:
         raise Exception(f"토큰 발급 실패: {data.get('return_msg')}")
     return data["token"]
-
-
-def get_stock_list_kiwoom(token, mrkt_tp):
-    """ka10099 종목 리스트 조회 → [(code, name), ...].
-
-    mrkt_tp: "0"=KOSPI(코스피), "10"=KOSDAQ(코스닥).
-    페이지네이션은 응답 헤더 cont-yn/next-key로 처리.
-    """
-    url = f"{KIWOOM_DOMAIN}/api/dostk/stkinfo"
-    result = []
-    req_headers = {
-        "Content-Type": "application/json;charset=UTF-8",
-        "api-id": "ka10099",
-        "authorization": f"Bearer {token}",
-    }
-    body = {"mrkt_tp": mrkt_tp}
-
-    while True:
-        time.sleep(0.5)
-        response = requests.post(url, json=body, headers=req_headers)
-        data = response.json()
-        if data.get("return_code") != 0:
-            break
-        stocks = data.get("list", [])
-        if not stocks:
-            break
-        for s in stocks:
-            code = s.get("code", "")
-            name = s.get("name", "")
-            if code and name:
-                result.append((code, name))
-        cont_yn = response.headers.get("cont-yn", "N")
-        if cont_yn != "Y":
-            break
-        req_headers["cont-yn"] = "Y"
-        req_headers["next-key"] = response.headers.get("next-key", "")
-
-    return result
-
-
-def fetch_tickers_kiwoom_parallel(token):
-    """KOSPI("0") + KOSDAQ("10")을 병렬로 호출하여 합쳐진 (code, name) 리스트 반환."""
-    markets = ["0", "10"]
-    results = []
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(get_stock_list_kiwoom, token, m) for m in markets]
-        for f in futures:
-            results.extend(f.result())
-    return results
-
-
-def resolve_target_tickers(engine):
-    """키움 ka10099로 ticker 수집, 실패하거나 0건이면 DB Fallback으로 우회."""
-    try:
-        token = get_kiwoom_token()
-        tickers = fetch_tickers_kiwoom_parallel(token)
-        if tickers:
-            print(f"  키움 API로 {len(tickers)}개 종목 조회 완료")
-            return tickers
-        print("  키움 API가 0건 반환 → DB Fallback으로 우회")
-    except Exception as e:
-        print(f"  [키움 API 실패] {e} → DB Fallback으로 우회")
-    return get_tickers_from_db(engine)
 
 
 # ============================================================
@@ -500,10 +429,11 @@ def main():
         start_date_str = start_date_obj.strftime("%Y%m%d")
         print(f"New stock data range: {start_date_str} ~ {end_date_str}")
 
-        # 3. 대상 종목 가져오기 (키움 ka10099 + DB Fallback)
-        print("Fetching ticker list via Kiwoom REST API (ka10099)...")
-        all_ticker_names = resolve_target_tickers(engine)
-        print(f"Total tickers: {len(all_ticker_names)}")
+        # 3. 종목 마스터 동기화 후 현재 상장 종목 가져오기
+        #    (키움 ka10099로 신규편입/상폐 반영 → stock_master 갱신 → 현재 상장만 반환)
+        print("Syncing stock_master via Kiwoom REST API (ka10099)...")
+        all_ticker_names = stock_master.resolve_universe(engine)
+        print(f"Total listed tickers: {len(all_ticker_names)}")
 
         if len(all_ticker_names) == 0:
             print("\n[ERROR] No tickers found from Kiwoom or DB. Aborting stock fetch.")
